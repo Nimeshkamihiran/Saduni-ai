@@ -1,7 +1,7 @@
 {
   "name": "saduni-whatsapp-bot",
   "version": "1.0.0",
-  "description": "Saduni — WhatsApp AI girlfriend bot (Gemini-only, Baileys)",
+  "description": "Saduni — advanced WhatsApp AI girlfriend bot (Gemini-only)",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
