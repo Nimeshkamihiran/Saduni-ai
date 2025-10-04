@@ -1,16 +1,12 @@
 /**
- * Saduni — Advanced WhatsApp AI girlfriend bot (Gemini-only)
+ * Saduni — WhatsApp AI girlfriend bot (Gemini-only, API key)
  *
- * Features:
- * - Baileys WhatsApp connection (QR terminal)
- * - Gemini Generative Language v1beta (gemini-pro) integration
- * - Per-chat memory and persona (nickname, mood, emoji on/off)
- * - Mood detection, emoji-enabled replies, "human" touches
- * - Commands: .help .setnick .lovely .memory .setmood .mood .emoji
+ * - Uses Baileys for WhatsApp connection and qrcode-terminal for QR output
+ * - Uses Google Generative Language v1beta (gemini-pro) with API key only
+ * - Per-chat memory, persona, mood, emoji toggles, basic commands
  *
- * CONFIG: Put GEMINI_API_KEY or GEMINI_OAUTH_BEARER in .env (recommended).
- *
- * NOTE: Don't commit API keys to public repos.
+ * WARNING: This file contains a hardcoded API key for quick testing.
+ * Do NOT publish this to public repos. Prefer using .env or secret manager.
  */
 
 const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason } = require('@whiskeysockets/baileys');
@@ -18,123 +14,104 @@ const qrcode = require('qrcode-terminal');
 const fs = require('fs-extra');
 const path = require('path');
 const fetch = require('node-fetch'); // v2
-require('dotenv').config();
+// no dotenv used because key is hardcoded per your request
 
-// ---------- Config ----------
+// ---------------- CONFIG ----------------
+// Paste your API key here (you gave this key; used as requested)
+const GEMINI_API_KEY = 'AIzaSyAV-KhlQxFRVw5AvozYPuqNEKDilSWGevo';
+
+// Model & endpoint (using generativelanguage v1beta gemini-pro)
+const BASE_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent';
+const ENDPOINT = `${BASE_ENDPOINT}?key=${GEMINI_API_KEY}`;
+
 const MEMORY_FILE = path.join(__dirname, 'memory.json');
 const PERSONA_FILE = path.join(__dirname, 'persona.json');
 const MAX_MESSAGES_PER_CHAT = 100;
-const QR_SMALL = true;
 const MAX_RETRIES = 2;
+const QR_SMALL = true;
 
-let GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'AIzaSyAV-KhlQxFRVw5AvozYPuqNEKDilSWGevo'; // recommended to set in .env
-let GEMINI_OAUTH_BEARER = process.env.GEMINI_OAUTH_BEARER || '319057617500-acflu2ogcjmbbpq68q4h3f4pffo13j57.apps.googleusercontent.com'; // optional
-
-// Ensure storage files exist
+// ensure files exist
 if (!fs.existsSync(MEMORY_FILE)) fs.writeJSONSync(MEMORY_FILE, {});
 if (!fs.existsSync(PERSONA_FILE)) fs.writeJSONSync(PERSONA_FILE, {});
 
-// ---------- Utility: Memory & Persona ----------
-function readJSONSafe(file) { return fs.readJSONSync(file); }
-function writeJSONSafe(file, obj) { fs.writeJSONSync(file, obj, { spaces: 2 }); }
+// ---------------- helpers: memory & persona ----------------
+function readJSON(file) { return fs.readJSONSync(file); }
+function writeJSON(file, obj) { fs.writeJSONSync(file, obj, { spaces: 2 }); }
 
 function pushMemory(jid, role, text) {
-  const mem = readJSONSafe(MEMORY_FILE);
+  const mem = readJSON(MEMORY_FILE);
   if (!mem[jid]) mem[jid] = [];
   mem[jid].push({ t: Date.now(), role, text });
   if (mem[jid].length > MAX_MESSAGES_PER_CHAT) mem[jid] = mem[jid].slice(-MAX_MESSAGES_PER_CHAT);
-  writeJSONSafe(MEMORY_FILE, mem);
+  writeJSON(MEMORY_FILE, mem);
 }
 function getMemoryText(jid) {
-  const mem = readJSONSafe(MEMORY_FILE);
+  const mem = readJSON(MEMORY_FILE);
   if (!mem[jid]) return '';
   return mem[jid].map(m => `${m.role === 'user' ? 'User' : 'AI'}: ${m.text}`).join('\n');
 }
 function clearMemory(jid) {
-  const mem = readJSONSafe(MEMORY_FILE);
+  const mem = readJSON(MEMORY_FILE);
   delete mem[jid];
-  writeJSONSafe(MEMORY_FILE, mem);
+  writeJSON(MEMORY_FILE, mem);
 }
 
 function getPersona(jid) {
-  const p = readJSONSafe(PERSONA_FILE);
+  const p = readJSON(PERSONA_FILE);
   const base = { botName: 'Saduni', lovelyMode: true, nickname: 'Baby', tone: 'loving', mood: 'neutral', emoji: true };
   return Object.assign(base, (p[jid] || {}));
 }
 function setPersona(jid, obj) {
-  const p = readJSONSafe(PERSONA_FILE);
+  const p = readJSON(PERSONA_FILE);
   p[jid] = Object.assign(p[jid] || {}, obj);
-  writeJSONSafe(PERSONA_FILE, p);
+  writeJSON(PERSONA_FILE, p);
 }
 
-// ---------- Emotion detection (very simple keyword-based) ----------
+// ---------------- simple mood detector (keyword-based) ----------------
 const moodKeywords = {
-  happy: ['happy','great','good','awesome','luv','love','like','yay','cool','nice','smile','😊','😁','lol'],
-  sad: ['sad','depressed','unhappy','miss','cry','😭','😢','lonely','broken'],
-  angry: ['angry','mad','annoy','hate','furious','wtf'],
-  flirty: ['hot','sexy','date','kiss','love','bae','babe','crush','😍','😘'],
+  happy: ['happy','great','good','awesome','yay','nice','smile','glad','love','luv','😊','😁'],
+  sad: ['sad','depressed','unhappy','miss','cry','😭','😢','lonely'],
+  angry: ['angry','mad','annoy','hate','furious'],
+  flirty: ['hot','sexy','date','kiss','babe','bae','crush','😍','😘'],
 };
 
 function detectMoodFromText(text) {
   if (!text) return 'neutral';
   const t = text.toLowerCase();
-  for (const [mood, keys] of Object.entries(moodKeywords)) {
-    for (const k of keys) {
-      if (t.includes(k)) return mood;
-    }
+  for (const [m, keys] of Object.entries(moodKeywords)) {
+    for (const k of keys) if (t.includes(k)) return m;
   }
-  // exclamation or many emojis -> happy
-  if ((text.match(/[!]{2,}/) || []).length) return 'happy';
+  if ((text.match(/!{2,}/) || []).length) return 'happy';
   return 'neutral';
 }
 
-// emoji map for moods
-const moodEmoji = {
-  happy: '😊',
-  sad: '😢',
-  angry: '😠',
-  flirty: '😘',
-  neutral: '🙂'
-};
-
-// small set of humanizing closers per mood
+const moodEmoji = { happy: '😊', sad: '😢', angry: '😠', flirty: '😘', neutral: '🙂' };
 const moodClosers = {
-  happy: ["Love you 💖", "You're my sunshine ☀️", "Always here for you 😊"],
-  sad: ["I'm here with you 💕", "Don't worry, tell me more 💛", "Hug you 🤗"],
-  angry: ["Take it easy, baby 😔", "Calm down — I'm here ❤️"],
-  flirty: ["Hehe 😏 you make me blush", "Come closer 😘", "Can't stop thinking about you 💗"],
-  neutral: ["Tell me more", "Yes?", "I'm listening"]
+  happy: ["Love you 💖","You're my sunshine ☀️","Always here 😊"],
+  sad: ["I'm here with you 💕","Tell me more 💛","Hug 🤗"],
+  angry: ["Take it easy ❤️","I'm here baby 😔"],
+  flirty: ["Hehe 😏 you make me blush","Come closer 😘","Can't stop thinking of you 💗"],
+  neutral: ["Tell me more","Yes?","I'm listening"]
 };
-
-// choose a short humanizing closer
 function chooseCloser(mood) {
   const arr = moodClosers[mood] || moodClosers['neutral'];
-  return arr[Math.floor(Math.random() * arr.length)];
+  return arr[Math.floor(Math.random()*arr.length)];
 }
 
-// ---------- Gemini call (v1beta, robust + retry) ----------
+// ---------------- Gemini call (v1beta) ----------------
 async function callGemini(prompt, attempt = 0) {
-  // endpoint uses query key (or we can use Authorization header)
-  const baseUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent';
-  const endpoint = GEMINI_API_KEY ? `${baseUrl}?key=${GEMINI_API_KEY}` : baseUrl;
-
   const headers = { 'Content-Type': 'application/json' };
-  if (GEMINI_OAUTH_BEARER) headers['Authorization'] = `Bearer ${GEMINI_OAUTH_BEARER}`;
-  if (!GEMINI_OAUTH_BEARER && GEMINI_API_KEY) headers['x-goog-api-key'] = GEMINI_API_KEY;
-
+  // endpoint already contains key in query param
   const body = {
     contents: [
-      {
-        role: 'user',
-        parts: [{ text: prompt }]
-      }
+      { role: 'user', parts: [{ text: prompt }] }
     ],
     temperature: 0.75,
     maxOutputTokens: 300
   };
 
   try {
-    const res = await fetch(endpoint, {
+    const res = await fetch(ENDPOINT, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
@@ -152,15 +129,16 @@ async function callGemini(prompt, attempt = 0) {
     }
 
     const j = await res.json();
-    console.log('Gemini response (first 3000 chars):', JSON.stringify(j).slice(0, 3000));
+    console.log('Gemini response (truncated):', JSON.stringify(j).slice(0, 3000));
 
-    // Try multiple response shapes
+    // Try multiple shapes to extract text
     const candidate =
       j?.candidates?.[0]?.content?.parts?.[0]?.text ||
       j?.candidates?.[0]?.content ||
       (Array.isArray(j?.output) && j.output[0]?.content?.text) ||
       j?.outputText ||
       j?.text ||
+      j?.response?.outputText ||
       null;
 
     if (candidate) return String(candidate).trim();
@@ -170,10 +148,11 @@ async function callGemini(prompt, attempt = 0) {
       return callGemini(prompt, attempt + 1);
     }
 
-    console.error('Gemini returned no candidate text. Full response:', JSON.stringify(j).slice(0, 4000));
+    console.error('No text candidate in Gemini response. Full response (truncated):', JSON.stringify(j).slice(0, 4000));
     return null;
+
   } catch (err) {
-    console.error('Gemini call error:', err);
+    console.error('callGemini error:', err);
     if (attempt < MAX_RETRIES) {
       await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt)));
       return callGemini(prompt, attempt + 1);
@@ -184,48 +163,46 @@ async function callGemini(prompt, attempt = 0) {
 
 async function generateWithGemini({ jid, userMessage }) {
   const persona = getPersona(jid);
-  const memoryText = getMemoryText(jid);
-  const systemPrompt = `
-You are ${persona.botName}. You are affectionate, warm, playful and human-like.
-Tone: ${persona.tone} (loving/caring). Keep replies SHORT (1-4 sentences).
-If emoji is allowed, include 1-2 appropriate emojis. Do NOT include system-level or code blocks.
-User message: ${userMessage}
-Memory: ${memoryText ? memoryText.substring(0, 1500) : '(no memory)'}
-Respond as ${persona.botName} in a natural, conversational way.
-`.trim();
-
-  const prompt = systemPrompt;
+  const memoryText = getMemoryText(jid).slice(-4000); // limit memory included
+  const systemPrompt = `You are ${persona.botName}. Be affectionate, warm, playful and human-like. Tone: ${persona.tone}. Keep replies short (1-4 sentences). If emoji is allowed, include 1-2 appropriate emojis. Avoid code blocks or system text.`;
+  const promptParts = [
+    systemPrompt,
+    '### Memory:',
+    memoryText || '(no memory)',
+    '### Conversation:',
+    `User: ${userMessage}`,
+    `${persona.botName}:`
+  ];
+  const prompt = promptParts.join('\n');
 
   try {
-    const result = await callGemini(prompt);
-    if (!result) return "Saduni is having trouble thinking right now. Try again in a moment.";
+    const raw = await callGemini(prompt);
+    if (!raw) return "Saduni is having trouble thinking right now. Try again in a moment.";
 
-    // post-process: adjust based on mood/emoji setting & add human closer
-    let reply = result.trim();
+    let reply = String(raw).trim();
 
-    // remove leading role labels if present
+    // remove role prefixes if present
     reply = reply.replace(/^AI:\s*/i, '').replace(/^Saduni:\s*/i, '');
 
-    // auto-detect mood from user message if persona mood is neutral
+    // determine mood
     let autoMood = persona.mood || detectMoodFromText(userMessage);
     if (persona.mood === 'neutral') {
       const detected = detectMoodFromText(userMessage);
       if (detected && detected !== 'neutral') autoMood = detected;
     }
 
-    // Append small closer or teasing line for more human feel
+    // Append closer & emoji per persona settings
     const closer = chooseCloser(autoMood);
     if (persona.emoji) {
       const em = moodEmoji[autoMood] || moodEmoji['neutral'];
-      // If reply already contains emoji, don't duplicate; else add one
-      if (!/[\u{1F300}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{1F600}-\u{1F64F}]/u.test(reply)) {
-        reply = `${reply} ${em}`;
-      }
-      // Append closer with emoji
+      if (!/[\p{Emoji}]/u.test(reply)) reply = `${reply} ${em}`;
       reply = `${reply}\n\n${closer}`;
     } else {
-      reply = `${reply}\n\n${closer}`;
+      reply = `${reply}\n\n${closer.replace(/[\p{Emoji}]/gu, '')}`;
     }
+
+    // trim final length
+    if (reply.length > 1000) reply = reply.slice(0, 1000) + '...';
 
     return reply;
   } catch (err) {
@@ -234,15 +211,12 @@ Respond as ${persona.botName} in a natural, conversational way.
   }
 }
 
-// ---------- WhatsApp (Baileys) ----------
+// ---------------- WhatsApp (Baileys) ----------------
 async function start() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
   const { version } = await fetchLatestBaileysVersion();
 
-  const sock = makeWASocket({
-    version,
-    auth: state
-  });
+  const sock = makeWASocket({ version, auth: state });
 
   sock.ev.on('creds.update', saveCreds);
 
@@ -250,7 +224,7 @@ async function start() {
     const { connection, lastDisconnect, qr } = update;
     if (qr) {
       qrcode.generate(qr, { small: QR_SMALL });
-      console.log('Scan the QR above with WhatsApp (Settings → Linked devices → Link a device).');
+      console.log('Scan the QR above with WhatsApp → Settings → Linked devices → Link a device');
     }
     if (connection === 'close') {
       const shouldReconnect = !(lastDisconnect?.error?.output?.statusCode === DisconnectReason.loggedOut);
@@ -277,23 +251,22 @@ async function start() {
 
     console.log(`Message from ${jid}:`, text);
 
-    // Commands (start with dot)
+    // commands start with dot
     if (text.startsWith('.')) {
       const parts = text.trim().split(/\s+/);
       const cmd = parts[0].slice(1).toLowerCase();
 
       if (cmd === 'help') {
-        await sock.sendMessage(jid, {
-          text:
+        await sock.sendMessage(jid, { text:
 `Saduni commands:
 .help                - show this help
 .setnick <name>      - set nickname AI uses (default "Baby")
 .lovely on|off       - toggle lovely mode (changes tone)
 .memory show         - show saved memory
 .memory clear        - clear memory
-.setmood <mood>      - set mood (happy|sad|flirty|angry|neutral)
+.setmood <m>         - set mood (happy|sad|flirty|angry|neutral)
 .mood                - show current mood
-.emoji on|off        - enable/disable emojis in replies`
+.emoji on|off        - enable/disable emoji in replies`
         });
         return;
       }
@@ -301,7 +274,7 @@ async function start() {
       if (cmd === 'setnick') {
         const name = parts.slice(1).join(' ') || 'Baby';
         setPersona(jid, { nickname: name });
-        await sock.sendMessage(jid, { text: `Okay 💕 I'll call you ${name}.` });
+        await sock.sendMessage(jid, { text: `Okay — I'll call you ${name}.` });
         return;
       }
 
@@ -316,7 +289,7 @@ async function start() {
       if (cmd === 'memory') {
         const sub = (parts[1] || '').toLowerCase();
         if (sub === 'show') {
-          const mem = readJSONSafe(MEMORY_FILE)[jid] || [];
+          const mem = readJSON(MEMORY_FILE)[jid] || [];
           const showText = mem.slice(-30).map(x => `${new Date(x.t).toLocaleString()}: ${x.role}: ${x.text}`).join('\n') || '(no memory)';
           await sock.sendMessage(jid, { text: `Memory:\n${showText}` });
           return;
@@ -332,11 +305,8 @@ async function start() {
 
       if (cmd === 'setmood') {
         const mood = (parts[1] || '').toLowerCase();
-        const allowed = ['happy','sad','angry','flirty','neutral'];
-        if (!allowed.includes(mood)) {
-          await sock.sendMessage(jid, { text: `Allowed moods: ${allowed.join(', ')}` });
-          return;
-        }
+        const allow = ['happy','sad','angry','flirty','neutral'];
+        if (!allow.includes(mood)) return await sock.sendMessage(jid, { text: `Allowed moods: ${allow.join(', ')}` });
         setPersona(jid, { mood });
         await sock.sendMessage(jid, { text: `Mood set to ${mood}.` });
         return;
@@ -360,33 +330,25 @@ async function start() {
       return;
     }
 
-    // Regular conversation flow
-    // Save user message to memory
+    // normal conversation
     pushMemory(jid, 'user', text);
 
-    // update persona mood automatically if user message has strong mood
+    // auto-update mood if strong signal and persona neutral
     const personaNow = getPersona(jid);
     const detected = detectMoodFromText(text);
-    if (detected && detected !== 'neutral' && personaNow.mood === 'neutral') {
-      setPersona(jid, { mood: detected });
-    }
+    if (detected !== 'neutral' && personaNow.mood === 'neutral') setPersona(jid, { mood: detected });
 
-    // Show composing presence
     try { await sock.sendPresenceUpdate('composing', jid); } catch (e) {}
 
-    // Generate AI reply
     const aiReply = await generateWithGemini({ jid, userMessage: text });
-
-    // Save bot reply
     pushMemory(jid, 'ai', aiReply || '');
 
-    // Send message
     await sock.sendMessage(jid, { text: aiReply });
   });
 }
 
 // Start
 start().catch(e => {
-  console.error('Start error:', e);
+  console.error('Fatal start error:', e);
   process.exit(1);
 });
