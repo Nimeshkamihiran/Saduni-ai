@@ -27,8 +27,8 @@ const MAX_MESSAGES_PER_CHAT = 100;
 const QR_SMALL = true;
 const MAX_RETRIES = 2;
 
-let GEMINI_API_KEY = process.env.GEMINI_API_KEY || ''; // recommended to set in .env
-let GEMINI_OAUTH_BEARER = process.env.GEMINI_OAUTH_BEARER || ''; // optional
+let GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'AIzaSyAV-KhlQxFRVw5AvozYPuqNEKDilSWGevo'; // recommended to set in .env
+let GEMINI_OAUTH_BEARER = process.env.GEMINI_OAUTH_BEARER || '319057617500-acflu2ogcjmbbpq68q4h3f4pffo13j57.apps.googleusercontent.com'; // optional
 
 // Ensure storage files exist
 if (!fs.existsSync(MEMORY_FILE)) fs.writeJSONSync(MEMORY_FILE, {});
